@@ -1,6 +1,6 @@
 import { Injectable } from '@angular/core';
 import { Router } from '@angular/router';
-import { Observable, of, map, take } from 'rxjs';
+import { Observable, of, map, take, delay, switchMap } from 'rxjs';
 import { catchError } from 'rxjs/operators';
 import { AuthService } from '../services/auth.service';
 
@@ -31,7 +31,10 @@ export class AuthGuard {
         return false;
       }
     }),
-    catchError(() => {
+    catchError((error) => {
+      console.warn('Auth guard error:', error);
+      // For cold start errors, we might want to show a different message
+      // But for now, just redirect to login
       this.router.navigate(['/login']);
       return of(false);
     })

@@ -1,9 +1,10 @@
 import { Injectable, PLATFORM_ID, inject } from '@angular/core';
-import { HttpClient } from '@angular/common/http';
-import { BehaviorSubject, Observable, tap, catchError, of, switchMap, map, throwError } from 'rxjs';
+import { HttpClient, HttpErrorResponse } from '@angular/common/http';
+import { BehaviorSubject, Observable, tap, catchError, of, switchMap, map, throwError, retry, delay } from 'rxjs';
 import { isPlatformBrowser } from '@angular/common';
 import { Router } from '@angular/router';
 import { environment } from '../../environments/environment';
+import { KeepAliveService } from './keep-alive.service';
 
 @Injectable({
   providedIn: 'root'
@@ -14,6 +15,7 @@ export class AuthService {
   public currentUser$ = this.currentUserSubject.asObservable();
   private platformId = inject(PLATFORM_ID);
   private router = inject(Router);
+  private keepAliveService = inject(KeepAliveService);
   private initialized = false;
   constructor(private http: HttpClient) {
     if (this.isLocalStorageAvailable()) {
@@ -34,11 +36,51 @@ export class AuthService {
       return this.getCurrentUser();
     }
     return of(null);
+  }
+
+  /**
+   * Check if the error indicates the server is sleeping (cold start)
+   */
+  private isColdStartError(error: HttpErrorResponse): boolean {
+    // Common indicators that the server is sleeping
+    return (
+      error.status === 0 || // Connection failed
+      error.status === 503 || // Service unavailable
+      error.status === 502 || // Bad gateway
+      (error as any).name === 'TimeoutError' ||
+      (!!error.message && error.message.toLowerCase().includes('timeout')) ||
+      (!!error.message && error.message.toLowerCase().includes('network'))
+    );
+  }
+
+  /**
+   * Enhanced HTTP request with retry logic for cold starts
+   */
+  private makeRequestWithRetry<T>(requestFn: () => Observable<T>, maxRetries: number = 3): Observable<T> {
+    return requestFn().pipe(
+      catchError((error: HttpErrorResponse) => {
+        if (this.isColdStartError(error) && maxRetries > 0) {
+          console.log(`Cold start detected, retrying... (${maxRetries} attempts remaining)`);
+          
+          // Try to wake up the server
+          this.keepAliveService.wakeUpServer();
+          
+          // Retry after a delay
+          return of(null).pipe(
+            delay(2000), // Wait 2 seconds
+            switchMap(() => this.makeRequestWithRetry(requestFn, maxRetries - 1))
+          );
+        }
+        return throwError(() => error);
+      })
+    );
   }  login(identifier: string, password: string): Observable<any> {
-    return this.http.post(`${this.API_URL}/auth/local`, {
-      identifier,
-      password
-    }).pipe(
+    return this.makeRequestWithRetry(() => 
+      this.http.post(`${this.API_URL}/auth/local`, {
+        identifier,
+        password
+      })
+    ).pipe(
       tap((response: any) => {
         if (this.isLocalStorageAvailable()) {
           localStorage.setItem('jwt', response.jwt);
@@ -82,13 +124,18 @@ export class AuthService {
     this.currentUserSubject.next(null);
     this.router.navigate(['/login']);
   }getCurrentUser(): Observable<any> {
-    return this.http.get(`${this.API_URL}/users/me`).pipe(
-      tap(user => {
-        this.currentUserSubject.next(user);
-      }),
+    return this.makeRequestWithRetry(() => 
+      this.http.get(`${this.API_URL}/users/me`).pipe(
+        tap(user => {
+          this.currentUserSubject.next(user);
+        })
+      )
+    ).pipe(
       catchError(error => {
         if (error.status === 403) {
           this.logout();
+        } else if (this.isColdStartError(error)) {
+          console.warn('Server appears to be sleeping. Please wait while we wake it up...');
         }
         return of(null);
       })
