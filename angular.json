@@ -48,7 +48,7 @@
                   "maximumError": "12kB"
                 }              ],
               "outputHashing": "all",
-              "baseHref": "/Ionut-gardu/"
+              "baseHref": "/Time-Tracking-App/"
             },
             "development": {
               "optimization": false,
